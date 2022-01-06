@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+
+#from dmitry
+
+	CUSTOM_DIR=$(dirname "$BASH_SOURCE")
+
+	source $CUSTOM_DIR/h-manifest.conf
+	#source $CUSTOM_CONFIG_FILENAME
+
+	algo="blake"
+
+	khs=0
+	stats=0
+	gpu_stats=$(< $GPU_STATS_JSON)
+
+	readarray -t gpu_stats < <( jq --slurp -r -c '.[] | .busids, .brand, .temp, .fan | join(" ")' $GPU_STATS_JSON 2>/dev/null)
+	busids=(${gpu_stats[0]})
+	brands=(${gpu_stats[1]})
+	temps=(${gpu_stats[2]})
+	fans=(${gpu_stats[3]})
+	count=${#busids[@]}
+
+	hash_arr=()
+	busid_arr=()
+	fan_arr=()
+	temp_arr=()
+	lines=()
+
+	now=$(( $(date +%s) - 30 ))
+	if [[ -f $CUSTOM_LOG_BASENAME.log && `stat -c %Y $CUSTOM_LOG_BASENAME.log` -gt $now ]]; then
+		# hashrate: 16520 MH/s gpu0: 1173 MH/s gpu1: 1117 MH/s gpu2: 1296 MH/s gpu3: 1293 MH/s gpu4: 1308 MH/s gpu5: 1271 MH/s gpu6: 1334 MH/s gpu7: 1271 MH/s gpu8: 1313 MH/s gpu9: 1289 MH/s gpu10: 1282 MH/s gpu11: 1289 MH/s gpu12: 1284 MH/s
+		readarray -t lines < <( tac $CUSTOM_LOG_BASENAME.log | grep -E 'hashrate' )
+		for((i=${#lines}-1; i>=0; i--)); do
+      [[ "${lines[i]}" =~ hashrate:\ ([0-9]+) ]] && khs=`echo "${BASH_REMATCH[1]}" | awk '{print int($1*1000)}'` && break
+      done
+##      lines[0]="${lines[i]}"
+    else
+      echo "No log $CUSTOM_LOG_BASENAME.log"
+	fi
+
+  if [ $(gpu-detect NVIDIA) -gt 0 ]; then
+    BRAND_MINER="nvidia"
+  elif [ $(gpu-detect AMD) -gt 0 ]; then
+    BRAND_MINER="amd"
+  fi
+
+	idx=0
+	for(( i=0; i < count; i++ )); do
+		[[ "${brands[i]}" != $BRAND_MINER ]] && continue
+		[[ "${busids[i]}" =~ ^([A-Fa-f0-9]+): ]]
+		busid_arr+=($((16#${BASH_REMATCH[1]})))
+		temp_arr+=(${temps[i]})
+		fan_arr+=(${fans[i]})
+		[[ "${lines[0]}" =~ gpu${idx}:\ ([0-9]+) ]] && hash_arr+=(${BASH_REMATCH[1]}) || hash_arr+=(0)
+		((idx++))
+	done
+
+	hash_json=`printf '%s\n' "${hash_arr[@]}" | jq -cs '.'`
+	bus_numbers=`printf '%s\n' "${busid_arr[@]}"  | jq -cs '.'`
+	fan_json=`printf '%s\n' "${fan_arr[@]}"  | jq -cs '.'`
+	temp_json=`printf '%s\n' "${temp_arr[@]}"  | jq -cs '.'`
+
+	uptime=$(( `date +%s` - `stat -c %Y $CUSTOM_CONFIG_FILENAME` ))
+
+	[[ "${lines[0]}" =~ solutions:\ ([0-9]+) ]] && found=${BASH_REMATCH[1]} || found=0
+
+	stats=$(jq -n --arg found "$found" --arg algo "$algo" --argjson bus_numbers "$bus_numbers" \
+		--argjson fan "$fan_json" --argjson temp "$temp_json" --argjson hs "$hash_json" --arg uptime "$uptime" \
+		--arg ver "$CUSTOM_VERSION" \
+		'{hs_units: "mhs", $hs, $algo, $ver, $uptime, $bus_numbers, $temp, $fan, ar:[$found|tonumber]}')
+
+	#echo $khs
+	#echo $stats
